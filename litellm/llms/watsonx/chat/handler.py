@@ -58,7 +58,6 @@ class WatsonXChatHandler(OpenAILikeChatHandler):
             api_params=api_params,
         )
         optional_params.update(watsonx_auth_payload)
-
         ## GET API URL
         api_base = watsonx_chat_transformation.get_complete_url(
             api_base=api_base,

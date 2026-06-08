@@ -1,3 +1,4 @@
+import json
 from typing import Dict, List, Optional, Union, cast
 
 import httpx
@@ -25,60 +26,85 @@ class WatsonXAIError(BaseLLMException):
 iam_token_cache = InMemoryCache()
 
 
-def get_watsonx_iam_url():
+def get_watsonx_iam_url() -> str:
     return (
         get_secret_str("WATSONX_IAM_URL") or "https://iam.cloud.ibm.com/identity/token"
     )
 
 
-def generate_iam_token(api_key=None, **params) -> str:
+def get_cpd_auth_url(cpd_url: str) -> str:
+    return (
+        get_secret_str("WATSONX_IAM_URL") or f"{cpd_url.rstrip('/')}/icp4d-api/v1/authorize"
+    )
+
+def generate_iam_token(api_key:Optional[str]=None, base_url: Optional[str] = None, **params) -> str:
+    if api_key is None:
+        api_key = get_secret_str("WATSONX_API_KEY") or get_secret_str("WX_API_KEY")
     result: Optional[str] = iam_token_cache.get_cache(api_key)  # type: ignore
-
-    if result is None:
-        headers = {}
+    if result is not None: # Cache hit
+        return cast(str, result)
+    # Cache miss, generate a new token
+    payload = {}
+    headers = {"Accept": "application/json"}
+    is_cpd_instance = (get_secret_str("WATSONX_INSTANCE_ID") or "").lower() == "openshift"
+    if not is_cpd_instance:  # SaaS (cloud) instance
+        if api_key is None:
+            raise ValueError("API key is required. Set WATSONX_API_KEY in environment variables or pass in as a parameter.")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        if api_key is None:
-            api_key = (
-                get_secret_str("WX_API_KEY")
-                or get_secret_str("WATSONX_API_KEY")
-                or get_secret_str("WATSONX_APIKEY")
-            )
-        if api_key is None:
-            raise ValueError("API key is required")
-        headers["Accept"] = "application/json"
-        data = {
-            "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
-            "apikey": api_key,
-        }
-        iam_token_url = get_watsonx_iam_url()
-        verbose_logger.debug(
-            "calling ibm `/identity/token` to retrieve IAM token.\nURL=%s\nheaders=%s\ndata=%s",
-            iam_token_url,
-            headers,
-            data,
+        payload["grant_type"] = "urn:ibm:params:oauth:grant-type:apikey"
+        payload["apikey"] = api_key
+        token_url = get_watsonx_iam_url()
+    else:  # Software/On-premise instance
+        headers["Content-Type"] = "application/json"
+        username = get_secret_str("WATSONX_USERNAME") or get_secret_str("WX_USERNAME")
+        password = get_secret_str("WATSONX_PASSWORD") or get_secret_str("WX_PASSWORD")
+        if base_url is None:
+            base_url = get_secret_str("WATSONX_URL") or get_secret_str("WATSONX_API_BASE") or get_secret_str("WX_API_BASE")
+        if base_url is None:
+            raise ValueError("Base URL is required for 'openshift' instances. Set WATSONX_API_BASE or WATSONX_URL in environment variables or pass in as a parameter.")
+        if username is None:
+            raise ValueError("Username is required for 'openshift' instances. Set WATSONX_USERNAME in environment variables.")
+        else:
+            payload["username"] = username
+        if api_key is not None:
+            payload["api_key"] = api_key
+        elif password is not None:
+            payload["password"] = password
+        else:
+            raise ValueError("API key or password is required. Set WATSONX_API_KEY or WATSONX_PASSWORD in environment variables or pass in as a parameter.")
+        token_url = get_cpd_auth_url(base_url)
+    
+    data = json.dumps(payload)
+    verbose_logger.debug(
+        "calling ibm `/identity/token` to retrieve IAM token.\nURL=%s\nheaders=%s\ndata=%s",
+        token_url,
+        headers,
+        data,
+    )
+    response = litellm.module_level_client.post(
+        url=token_url, data=data, headers=headers
+    )
+    response.raise_for_status()
+    json_resp = response.json()
+    # SaaS (cloud) IAM returns "access_token", while cpd (Software/On-premise) instances returns "token"
+    result = json_resp.get("access_token") or json_resp.get("token")
+    if result is None:
+        raise ValueError(
+            f"Failed to get IAM token from watsonx. Response: {json_resp}"
         )
-        response = litellm.module_level_client.post(
-            url=iam_token_url, data=data, headers=headers
-        )
-        response.raise_for_status()
-        json_data = response.json()
-
-        result = json_data["access_token"]
-        iam_token_cache.set_cache(
-            key=api_key,
-            value=result,
-            ttl=json_data["expires_in"] - 10,  # leave some buffer
-        )
-
+    iam_token_cache.set_cache(
+        key=api_key,
+        value=result,
+        ttl=json_resp.get("expires_in", 3600) - 10,  # leave some buffer
+    )
     return cast(str, result)
 
 
-def _generate_watsonx_token(api_key: Optional[str], token: Optional[str]) -> str:
+def _generate_watsonx_token(api_key: Optional[str], token: Optional[str], base_url: Optional[str] = None) -> str:
     if token is not None:
         return token
-    token = generate_iam_token(api_key)
+    token = generate_iam_token(api_key, base_url=base_url)
     return token
-
 
 def _get_api_params(
     params: dict,
@@ -118,10 +144,10 @@ def _get_api_params(
             or get_secret_str("SPACE_ID")
         )
 
-    if project_id is None:
+    if project_id is None and space_id is None:
         raise WatsonXAIError(
             status_code=401,
-            message="Error: Watsonx project_id not set. Set WX_PROJECT_ID in environment variables or pass in as a parameter.",
+            message="Error: Watsonx project_id nor space_id set. Set WATSONX_PROJECT_ID or WATSONX_SPACE_ID in environment variables or pass in as a parameter.",
         )
 
     return WatsonXAPIParams(
@@ -189,7 +215,8 @@ class IBMWatsonXMixin:
         elif zen_api_key := get_secret_str("WATSONX_ZENAPIKEY"):
             headers["Authorization"] = f"ZenApiKey {zen_api_key}"
         else:
-            token = _generate_watsonx_token(api_key=api_key, token=token)
+            base_url = self._get_base_url(api_base)
+            token = _generate_watsonx_token(api_key=api_key, token=token, base_url=base_url)
             # build auth headers
             headers["Authorization"] = f"Bearer {token}"
         return {**default_headers, **headers}
@@ -284,9 +311,14 @@ class IBMWatsonXMixin:
     def _prepare_payload(self, model: str, api_params: WatsonXAPIParams) -> dict:
         payload: dict = {}
         if model.startswith("deployment/"):
-            return (
-                {}
-            )  # Deployment models do not support 'space_id' or 'project_id' in their payload
+            return {}
+            if api_params["space_id"] is None:
+                raise WatsonXAIError(
+                    status_code=401,
+                    message="Error: space_id is required for models called using the 'deployment/' endpoint. Pass in the space_id as a parameter or set it in the WX_SPACE_ID environment variable.",
+                )
+            payload["space_id"] = api_params["space_id"]
+            return payload
         payload["model_id"] = model
         payload["project_id"] = api_params["project_id"]
         return payload

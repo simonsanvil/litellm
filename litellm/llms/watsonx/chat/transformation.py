@@ -31,6 +31,7 @@ class IBMWatsonXChatConfig(IBMWatsonXMixin, OpenAIGPTConfig):
             "n",
             "presence_penalty",
             "response_format",
+            "thinking"
         ]
 
     def is_tool_choice_option(self, tool_choice: Optional[Union[str, dict]]) -> bool:
