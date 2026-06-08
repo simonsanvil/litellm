@@ -120,4 +120,7 @@ class IBMWatsonXChatConfig(IBMWatsonXMixin, OpenAIGPTConfig):
         payload["project_id"] = (
             None if model.startswith("deployment/") else api_params["project_id"]
         )
+        payload["space_id"] = (
+            None if model.startswith("deployment/") else api_params["space_id"]
+        )
         return payload

@@ -54,6 +54,7 @@ def generate_iam_token(api_key:Optional[str]=None, base_url: Optional[str] = Non
         payload["grant_type"] = "urn:ibm:params:oauth:grant-type:apikey"
         payload["apikey"] = api_key
         token_url = get_watsonx_iam_url()
+        data = payload
     else:  # Software/On-premise instance
         headers["Content-Type"] = "application/json"
         username = get_secret_str("WATSONX_USERNAME") or get_secret_str("WX_USERNAME")
@@ -73,8 +74,8 @@ def generate_iam_token(api_key:Optional[str]=None, base_url: Optional[str] = Non
         else:
             raise ValueError("API key or password is required. Set WATSONX_API_KEY or WATSONX_PASSWORD in environment variables or pass in as a parameter.")
         token_url = get_cpd_auth_url(base_url)
-    
-    data = json.dumps(payload)
+        data = json.dumps(payload)
+        
     verbose_logger.debug(
         "calling ibm `/identity/token` to retrieve IAM token.\nURL=%s\nheaders=%s\ndata=%s",
         token_url,
@@ -312,13 +313,9 @@ class IBMWatsonXMixin:
         payload: dict = {}
         if model.startswith("deployment/"):
             return {}
-            if api_params["space_id"] is None:
-                raise WatsonXAIError(
-                    status_code=401,
-                    message="Error: space_id is required for models called using the 'deployment/' endpoint. Pass in the space_id as a parameter or set it in the WX_SPACE_ID environment variable.",
-                )
-            payload["space_id"] = api_params["space_id"]
-            return payload
         payload["model_id"] = model
-        payload["project_id"] = api_params["project_id"]
+        if api_params['project_id'] is not None:
+            payload["project_id"] = api_params["project_id"]
+        elif api_params['space_id'] is not None:
+            payload["space_id"] = api_params["space_id"]
         return payload

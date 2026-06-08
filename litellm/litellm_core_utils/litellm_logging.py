@@ -1993,6 +1993,8 @@ class Logging(LiteLLMLoggingBaseClass):
                         and self.call_type
                         != CallTypes.pass_through.value  # pass-through endpoints call async_log_success_event
                     ):  # custom logger class
+                        # print(f"success callbacks: Running Custom Callback Function - {callback}")
+                        
                         if self.stream and complete_streaming_response is None:
                             callback.log_stream_event(
                                 kwargs=self.model_call_details,
